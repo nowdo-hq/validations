@@ -2,8 +2,10 @@ package validations
 
 import (
 	"fmt"
+	"reflect"
+	"strings"
 
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
 )
 
 // NewError generate a new error for a model's field
@@ -20,11 +22,27 @@ type Error struct {
 
 // Label is a label including model type, primary key and column name
 func (err Error) Label() string {
-	scope := gorm.Scope{Value: err.Resource}
-	return fmt.Sprintf("%v_%v_%v", scope.GetModelStruct().ModelType.Name(), scope.PrimaryKeyValue(), err.Column)
+	stmt := gorm.Statement{}
+	stmt.Parse(err.Resource)
+	var vars = []string{}
+	for _, field := range stmt.Schema.PrimaryFields {
+		v, _ := field.ValueOf(reflect.ValueOf(err.Resource))
+		vars = append(vars, fmt.Sprint(v))
+	}
+	return fmt.Sprintf("%v_%v_%v", stmt.Schema.ModelType.Name(), strings.Join(vars, "::"), err.Column)
 }
 
 // Error show error message
 func (err Error) Error() string {
 	return fmt.Sprintf("%v", err.Message)
+}
+
+// Validator ensures struct has validate functionality.
+type Validator interface {
+	Validate(db *gorm.DB)
+}
+
+// ValidatorWithError ensures struct has Validate functionality returns error as validation failure.
+type ValidatorWithError interface {
+	Validate(db *gorm.DB) error
 }

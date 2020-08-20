@@ -1,16 +1,17 @@
-package validations_test
+package validations
 
 import (
 	"errors"
 	"fmt"
+	"os"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/asaskevich/govalidator"
-	"github.com/jinzhu/gorm"
-	_ "github.com/mattn/go-sqlite3"
-	"github.com/qor/qor/test/utils"
-	"github.com/qor/validations"
+	"gorm.io/driver/mysql"
+	"gorm.io/driver/sqlite"
+	"gorm.io/gorm"
 )
 
 var db *gorm.DB
@@ -30,14 +31,14 @@ type User struct {
 
 func (user *User) Validate(db *gorm.DB) {
 	govalidator.CustomTypeTagMap.Set("uniqEmail", govalidator.CustomTypeValidator(func(email interface{}, context interface{}) bool {
-		var count int
-		if db.Model(&User{}).Where("email = ?", email).Count(&count); count == 0 || email == "" {
+		var count int64
+		if db.Session(&gorm.Session{}).Model(&User{}).Where("email = ?", email).Count(&count); count == 0 || email == "" {
 			return true
 		}
 		return false
 	}))
 	if user.Name == "invalid" {
-		db.AddError(validations.NewError(user, "Name", "invalid user name"))
+		db.AddError(NewError(user, "Name", "invalid user name"))
 	}
 }
 
@@ -60,7 +61,7 @@ type CreditCard struct {
 
 func (card *CreditCard) Validate(db *gorm.DB) {
 	if !regexp.MustCompile("^(\\d){13,16}$").MatchString(card.Number) {
-		db.AddError(validations.NewError(card, "Number", "invalid card number"))
+		db.AddError(NewError(card, "Number", "invalid card number"))
 	}
 }
 
@@ -72,7 +73,7 @@ type Address struct {
 
 func (address *Address) Validate(db *gorm.DB) {
 	if address.Address == "invalid" {
-		db.AddError(validations.NewError(address, "Address", "invalid address"))
+		db.AddError(NewError(address, "Address", "invalid address"))
 	}
 }
 
@@ -83,21 +84,57 @@ type Language struct {
 
 func (language *Language) Validate(db *gorm.DB) error {
 	if language.Code == "invalid" {
-		return validations.NewError(language, "Code", "invalid language")
+		return NewError(language, "Code", "invalid language")
 	}
 	return nil
 }
 
 func init() {
-	db = utils.TestDB()
-	validations.RegisterCallbacks(db)
+	os.Remove("test.db")
+	db = testDB()
+	RegisterCallbacks(db)
 	tables := []interface{}{&User{}, &Company{}, &CreditCard{}, &Address{}, &Language{}}
 	for _, table := range tables {
-		if err := db.DropTableIfExists(table).Error; err != nil {
+		if err := db.Migrator().AutoMigrate(table); err != nil {
 			panic(err)
 		}
-		db.AutoMigrate(table)
 	}
+}
+
+func testDB() *gorm.DB {
+	var db *gorm.DB
+	var err error
+	var dbuser, dbpwd, dbname = "qor", "qor", "qor_test"
+
+	if os.Getenv("DB_USER") != "" {
+		dbuser = os.Getenv("DB_USER")
+	}
+
+	if os.Getenv("DB_PWD") != "" {
+		dbpwd = os.Getenv("DB_PWD")
+	}
+
+	if os.Getenv("DB_NAME") != "" {
+		dbname = os.Getenv("DB_NAME")
+	}
+
+	if os.Getenv("TEST_DB") == "mysql" {
+		// CREATE USER 'qor'@'localhost' IDENTIFIED BY 'qor';
+		// CREATE DATABASE qor_test;
+		// GRANT ALL ON qor_test.* TO 'qor'@'localhost';
+		db, err = gorm.Open(mysql.New(mysql.Config{
+			DSN: fmt.Sprintf("%s:%s@/%s?charset=utf8&parseTime=True&loc=Local", dbuser, dbpwd, dbname),
+		}), &gorm.Config{})
+	} else {
+		os.Remove("test.db")
+		db, err = gorm.Open(sqlite.Open("test.db"), &gorm.Config{})
+	}
+
+	if err != nil {
+		panic(err)
+	}
+
+	return db
 }
 
 func TestGoValidation(t *testing.T) {
@@ -109,7 +146,7 @@ func TestGoValidation(t *testing.T) {
 	}
 
 	if result.Error.Error() != "Name can't be blank" {
-		t.Errorf("Error message should be equal `Name can't be blank`")
+		t.Errorf("Error message should be equal `Name can't be blank` but %v", result.Error.Error())
 	}
 
 	user = User{Name: "", Password: "123", SecurePassword: "AB123", Email: "aagmail.com"}
@@ -118,10 +155,8 @@ func TestGoValidation(t *testing.T) {
 		"Password is the wrong length (should be 6~20 characters)",
 		"SecurePassword is not a number",
 		"Email is not a valid email address"}
-	for i, err := range result.GetErrors() {
-		if messages[i] != err.Error() {
-			t.Errorf(fmt.Sprintf("Error message should be equal `%v`, but it is `%v`", messages[i], err.Error()))
-		}
+	if v, e := result.Error.Error(), strings.Join(messages, "; "); v != e {
+		t.Errorf(fmt.Sprintf("Error message should be equal `%v`, but it is `%v`", e, v))
 	}
 
 	user = User{Name: "A", Password: "123123", Email: "a@gmail.com"}

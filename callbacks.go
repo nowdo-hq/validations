@@ -2,32 +2,46 @@ package validations
 
 import (
 	"fmt"
+	"reflect"
 	"regexp"
 	"strings"
 
 	"github.com/asaskevich/govalidator"
-	"github.com/jinzhu/gorm"
+	"gorm.io/gorm"
 )
 
 var skipValidations = "validations:skip_validations"
 
-func validate(scope *gorm.Scope) {
+func validate(scope *gorm.DB) {
 	if _, ok := scope.Get("gorm:update_column"); !ok {
-		if result, ok := scope.DB().Get(skipValidations); !(ok && result.(bool)) {
-			if !scope.HasError() {
-				scope.CallMethod("Validate")
-				if scope.Value != nil {
-					resource := scope.IndirectValue().Interface()
-					_, validatorErrors := govalidator.ValidateStruct(resource)
-					if validatorErrors != nil {
-						if errors, ok := validatorErrors.(govalidator.Errors); ok {
-							for _, err := range flatValidatorErrors(errors) {
-								scope.DB().AddError(formattedError(err, resource))
-							}
-						} else {
-							scope.DB().AddError(validatorErrors)
+		if result, ok := scope.Get(skipValidations); !(ok && result.(bool)) {
+			if scope.Error == nil {
+				var runValidation = func(model interface{}) {
+					if v, ok := model.(Validator); ok {
+						v.Validate(scope)
+					}
+					if v, ok := model.(ValidatorWithError); ok {
+						if err := v.Validate(scope); err != nil {
+							scope.AddError(err)
 						}
 					}
+					if ok, err := govalidator.ValidateStruct(model); !ok {
+						if errors, ok := err.(govalidator.Errors); ok {
+							for _, err := range flatValidatorErrors(errors) {
+								scope.AddError(formattedError(err, model))
+							}
+						} else {
+							scope.AddError(err)
+						}
+					}
+				}
+				switch scope.Statement.ReflectValue.Kind() {
+				case reflect.Slice, reflect.Array:
+					for i := 0; i < scope.Statement.ReflectValue.Len(); i++ {
+						runValidation(scope.Statement.ReflectValue.Index(i).Interface())
+					}
+				case reflect.Struct:
+					runValidation(scope.Statement.Model)
 				}
 			}
 		}
